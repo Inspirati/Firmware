@@ -82,9 +82,17 @@ private:
 	struct mag_scale _mag_scale;
 	float _mag_range_scale;
 	perf_counter_t _mag_reads;
+	perf_counter_t _mag_errors;
 	float _mag_asa_x;
 	float _mag_asa_y;
 	float _mag_asa_z;
+	int16_t _last_x;
+	int16_t _last_y;
+	int16_t _last_z;
+	int8_t _rru;
+	int8_t  dxh, dxl;
+	int8_t  dyh, dyl;
+	int8_t  dzh, dzl;
 
 	/* do not allow to copy this class due to pointer data members */
 	MPU9250_mag(const MPU9250_mag &);

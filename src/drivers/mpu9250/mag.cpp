@@ -79,28 +79,50 @@
 
 /* mpu9250 master i2c bus specific register address and bit definitions */
 
-#define DIR_READ                    0x80
-#define DIR_WRITE                   0x00
+#define BIT_I2C_READ_FLAG           0x80
 
 #define MPUREG_I2C_MST_CTRL         0x24
 #define MPUREG_I2C_SLV0_ADDR        0x25
 #define MPUREG_I2C_SLV0_REG         0x26
 #define MPUREG_I2C_SLV0_CTRL        0x27
 
+#define MPUREG_I2C_SLV4_ADDR        0x31
+#define MPUREG_I2C_SLV4_REG         0x32
+#define MPUREG_I2C_SLV4_DO          0x33
+#define MPUREG_I2C_SLV4_CTRL        0x34
+#define MPUREG_I2C_SLV4_DI          0x35
+
 #define MPUREG_EXT_SENS_DATA_00     0x49
 #define MPUREG_I2C_SLV0_D0          0x63
 #define MPUREG_I2C_MST_DELAY_CTRL   0x67
 #define MPUREG_USER_CTRL            0x6A
 
-#define BIT_I2C_MST_P_NSR           0x10
+#define BIT_I2C_FIFO_EN             0x40
 #define BIT_I2C_MST_EN              0x20
+#define BIT_I2C_IF_DIS              0x10
+#define BIT_FIFO_RST                0x04
+#define BIT_I2C_MST_RST             0x02
+#define BIT_SIG_COND_RST            0x01
+
+#define BIT_I2C_SLV0_EN             0x80
+#define BIT_I2C_SLV0_BYTE_SW        0x40
+#define BIT_I2C_SLV0_REG_DIS        0x20
+#define BIT_I2C_SLV0_REG_GRP        0x10
+
+#define BIT_I2C_MST_MULT_MST_EN     0x80
+#define BIT_I2C_MST_WAIT_FOR_ES     0x40
+#define BIT_I2C_MST_SLV_3_FIFO_EN   0x20
+#define BIT_I2C_MST_P_NSR           0x10
+#define BITS_I2C_MST_CLOCK_258HZ    0x08
 #define BITS_I2C_MST_CLOCK_400HZ    0x0D
+
+#define BIT_I2C_SLV0_DLY_EN         0x01
+#define BIT_I2C_SLV1_DLY_EN         0x02
+#define BIT_I2C_SLV2_DLY_EN         0x04
+#define BIT_I2C_SLV3_DLY_EN         0x08
 
 
 /* ak8963 register address and bit definitions */
-
-#define BIT_I2C_SLVO_EN   0x80
-#define BIT_I2C_READ_FLAG 0x80
 
 #define AK8963_I2C_ADDR         0x0C
 #define AK8963_DEVICE_ID        0x48
@@ -134,9 +156,20 @@ MPU9250_mag::MPU9250_mag(MPU9250 *parent, const char *path) :
 	_mag_scale{},
 	_mag_range_scale(),
 	_mag_reads(perf_alloc(PC_COUNT, "mpu9250_mag_read")),
+	_mag_errors(perf_alloc(PC_COUNT, "mpu9250_mag_error")),
 	_mag_asa_x(1.0),
 	_mag_asa_y(1.0),
-	_mag_asa_z(1.0)
+	_mag_asa_z(1.0),
+	_last_x(0),
+	_last_y(0),
+	_last_z(0),
+	_rru(0),
+	dxh(0),
+	dxl(0),
+	dyh(0),
+	dyl(0),
+	dzh(0),
+	dzl(0)
 {
 	// default mag scale factors
 	_mag_scale.x_offset = 0;
@@ -160,6 +193,7 @@ MPU9250_mag::~MPU9250_mag()
 	}
 
 	perf_free(_mag_reads);
+	perf_free(_mag_errors);
 }
 
 int
@@ -208,23 +242,87 @@ MPU9250_mag::measure(struct ak8963_regs data)
 
 	if (data.st1 & 0x01) {
 		if (false == _mag_reading_data) {
-			_parent->write_reg(MPUREG_I2C_SLV0_CTRL, BIT_I2C_SLVO_EN | sizeof(struct ak8963_regs));
+			_parent->write_reg(MPUREG_I2C_SLV0_CTRL, BIT_I2C_SLV0_EN | sizeof(struct ak8963_regs));
 			_mag_reading_data = true;
 			return;
 
 		} else {
-			_parent->write_reg(MPUREG_I2C_SLV0_CTRL, BIT_I2C_SLVO_EN | 1);
+			_parent->write_reg(MPUREG_I2C_SLV0_CTRL, BIT_I2C_SLV0_EN | 1);
 			_mag_reading_data = false;
+			if (0 == _rru) {
+				return;  // this prevents the rapid repeat update
+			}
 		}
 
 	} else {
 		if (true == _mag_reading_data) {
-			_parent->write_reg(MPUREG_I2C_SLV0_CTRL, BIT_I2C_SLVO_EN | 1);
+			_parent->write_reg(MPUREG_I2C_SLV0_CTRL, BIT_I2C_SLV0_EN | 1);
 			_mag_reading_data = false;
+		} else {
+			_rru++;
 		}
 
 		return;
 	}
+
+	_rru = 0;
+
+#define DELTA 200
+
+	if (data.x > (_last_x + DELTA)) {
+		perf_count(_mag_errors);
+		if (dxh++ < 3) {
+			data.x = data.x - 256;
+		}
+	} else {
+		dxh = 0;
+	}
+	if (data.x < (_last_x - DELTA)) {
+		perf_count(_mag_errors);
+		if (dxl++ < 3) {
+			data.x = data.x + 256;
+		}
+	} else {
+		dxl = 0;
+	}
+
+	if (data.y > (_last_y + DELTA)) {
+		perf_count(_mag_errors);
+		if (dyh++ < 3) {
+			data.y = data.y - 256;
+		}
+	} else {
+		dyh = 0;
+	}
+	if (data.y < (_last_y - DELTA)) {
+		perf_count(_mag_errors);
+		if (dyl++ < 3) {
+		data.y = data.y + 256;
+		}
+	} else {
+		dyl = 0;
+	}
+
+	if (data.z > (_last_z + DELTA)) {
+		perf_count(_mag_errors);
+		if (dzh++ < 3) {
+			data.z = data.z - 256;
+		}
+	} else {
+		dzh = 0;
+	}
+	if (data.z < (_last_z - DELTA)) {
+		perf_count(_mag_errors);
+		if (dzl++ < 3) {
+			data.z = data.z + 256;
+		}
+	} else {
+		dzl = 0;
+	}
+
+	_last_x = data.x;
+	_last_y = data.y;
+	_last_z = data.z;
 
 	mag_report	mrb;
 	mrb.timestamp = hrt_absolute_time();
@@ -251,7 +349,7 @@ MPU9250_mag::measure(struct ak8963_regs data)
 	mrb.scaling = _mag_range_scale;
 	mrb.temperature = _parent->_last_temperature;
 
-	mrb.error_count = 0;
+	mrb.error_count = perf_event_count(_mag_errors);
 
 	_mag_reports->force(&mrb);
 
@@ -456,7 +554,7 @@ MPU9250_mag::set_passthrough(uint8_t reg, uint8_t size, uint8_t *out)
 
 	_parent->write_reg(MPUREG_I2C_SLV0_ADDR, addr);
 	_parent->write_reg(MPUREG_I2C_SLV0_REG,  reg);
-	_parent->write_reg(MPUREG_I2C_SLV0_CTRL, size | BIT_I2C_SLVO_EN);
+	_parent->write_reg(MPUREG_I2C_SLV0_CTRL, size | BIT_I2C_SLV0_EN);
 }
 
 void
