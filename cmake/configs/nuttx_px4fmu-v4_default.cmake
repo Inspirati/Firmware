@@ -67,6 +67,7 @@ set(config_module_list
 	systemcmds/dumpfile
 	systemcmds/ver
 	systemcmds/tests
+	systemcmds/esc
 
 	#
 	# General system control
